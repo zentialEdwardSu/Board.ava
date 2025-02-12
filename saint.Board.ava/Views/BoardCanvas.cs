@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 
 using Avalonia.Controls;
@@ -12,13 +13,22 @@ using saint.Board.ava.utils;
 
 namespace saint.Board.ava.Views;
 
+internal enum CanvasState
+{
+    Normal = 1,
+    Pinching,
+    Panning,
+}
+
 public class BoardCanvas:Control
 {    
     // Transform fields
-    private CanvasTransform _canvasTransform = new CanvasTransform();
-    private bool _isPanning;
+    private CanvasTransform _canvasTransform = new();
+    private CanvasState _state = CanvasState.Normal;
+    // private bool _isPanning;
     private Point _lastPointerPosition;
     private PointerPointProperties _panStartProperties;
+    private PointerEventArgs _lastMoveEvent;
     
     // Performance monitoring fields
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
@@ -27,6 +37,12 @@ public class BoardCanvas:Control
     private Dictionary<int, PointerPoints> _pointers = new(); // hold stroke create by Pen
     private PointerPointProperties? _lastProperties;
     private PointerUpdateKind? _lastNonOtherUpdateKind;// for Mouse button event
+    
+    // For gesture
+    private Dictionary<int, Point> _activeTouches = new();
+    private double _initialDistance;
+
+    public Dictionary<int, Point> ActiveTouch => _activeTouches;
 
     private int _threadSleep; // Sampling interval control
     public static readonly DirectProperty<BoardCanvas, int> ThreadSleepProperty =
@@ -67,6 +83,8 @@ public class BoardCanvas:Control
         get => _inputdevices;
         set => SetAndRaise(InputDevicesProperty, ref _inputdevices, value);
     }
+
+    private double _scalingSoftFactor = 0.1;
     
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
@@ -78,21 +96,23 @@ public class BoardCanvas:Control
             if (_stopwatch.Elapsed.TotalMilliseconds > 250)
             {
                 Status = $@"Events per second: {(_events / _stopwatch.Elapsed.TotalSeconds)}
-                            PointerUpdateKind: {_lastProperties?.PointerUpdateKind}
-                            Last PointerUpdateKind != Other: {_lastNonOtherUpdateKind}
-                            IsLeftButtonPressed: {_lastProperties?.IsLeftButtonPressed}
-                            IsRightButtonPressed: {_lastProperties?.IsRightButtonPressed}
-                            IsMiddleButtonPressed: {_lastProperties?.IsMiddleButtonPressed}
-                            IsXButton1Pressed: {_lastProperties?.IsXButton1Pressed}
-                            IsXButton2Pressed: {_lastProperties?.IsXButton2Pressed}
-                            IsBarrelButtonPressed: {_lastProperties?.IsBarrelButtonPressed}
-                            IsEraser: {_lastProperties?.IsEraser}
-                            IsInverted: {_lastProperties?.IsInverted}
-                            Pressure: {_lastProperties?.Pressure}
-                            XTilt: {_lastProperties?.XTilt}
-                            YTilt: {_lastProperties?.YTilt}
-                            Twist: {_lastProperties?.Twist}
-                            ZoomLevel: {_canvasTransform.ZoomLevel}";
+PointerUpdateKind: {_lastProperties?.PointerUpdateKind}
+Last PointerUpdateKind != Other: {_lastNonOtherUpdateKind}
+IsLeftButtonPressed: {_lastProperties?.IsLeftButtonPressed}
+IsRightButtonPressed: {_lastProperties?.IsRightButtonPressed}
+IsMiddleButtonPressed: {_lastProperties?.IsMiddleButtonPressed}
+IsXButton1Pressed: {_lastProperties?.IsXButton1Pressed}
+IsXButton2Pressed: {_lastProperties?.IsXButton2Pressed}
+IsBarrelButtonPressed: {_lastProperties?.IsBarrelButtonPressed}
+IsEraser: {_lastProperties?.IsEraser}
+IsInverted: {_lastProperties?.IsInverted}
+Pressure: {_lastProperties?.Pressure}
+XTilt: {_lastProperties?.XTilt}
+YTilt: {_lastProperties?.YTilt}
+Twist: {_lastProperties?.Twist}
+ZoomLevel: {_canvasTransform.ZoomLevel}
+ActiveTouch: {_activeTouches?.Count}
+CanvasState: {_state.ToString()}";
                 _stopwatch.Restart();
                 _events = 0;
             }
@@ -109,7 +129,7 @@ public class BoardCanvas:Control
         _statusUpdated?.Dispose();
     }
 
-    void HandleEvent(PointerEventArgs e)
+    private void HandleEvent(PointerEventArgs e)
     {
         _events++;
 
@@ -159,6 +179,18 @@ public class BoardCanvas:Control
             // render strokes
             foreach (var pt in _pointers.Values)
                 pt.Render(context, _drawOnlyPoints);
+            
+            // 绘制缩放中心点
+            if (_state == CanvasState.Pinching && _activeTouches.Count == 2)
+            {
+                var center = MidPoint(_activeTouches.Values.First(), _activeTouches.Values.Last());
+                var canvasCenter = _canvasTransform.ScreenToCanvas(center);
+
+                // 绘制一个圆形作为中心点标记
+                var brush = new SolidColorBrush(Colors.Red);
+                var pen = new Pen(Brushes.Black, 2);
+                context.DrawEllipse(brush, pen, canvasCenter, 10, 10);
+            }
         }
     }
 
@@ -167,9 +199,23 @@ public class BoardCanvas:Control
         _pointers.Clear();
         InvalidateVisual();
     }
+    
+    public void ResetView()
+    {
+        _canvasTransform = new CanvasTransform();
+        InvalidateVisual();
+    }
+    
+    // export private transform instants
+    public Point ScreenToCanvas(Point screenPoint) => 
+        _canvasTransform.ScreenToCanvas(screenPoint);
+
+    public Point CanvasToScreen(Point canvasPoint) => 
+        _canvasTransform.CanvasToScreen(canvasPoint);
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
+        Debug.WriteLine("OnPointerPressed");
         if (e.ClickCount == 2)
         {
             _pointers.Clear();
@@ -178,11 +224,28 @@ public class BoardCanvas:Control
         }
         
         var pointer = e.GetCurrentPoint(this);
-        
+
+        if (pointer.Pointer.Type == PointerType.Touch)
+        {
+            _activeTouches[pointer.Pointer.Id] = pointer.Position;
+
+            if (_activeTouches.Count == 1)
+            {
+                _lastPointerPosition = pointer.Position;
+            }
+            
+            // if 2 calculate distance between them
+            if (_activeTouches.Count == 2)
+            {
+                _initialDistance = GetDistanceBetweenPoints(_activeTouches.Values);
+            }
+        }
+
         if (pointer.Properties.IsMiddleButtonPressed || 
             (e.KeyModifiers.HasFlag(KeyModifiers.Alt) && pointer.Properties.IsLeftButtonPressed))
         {
-            _isPanning = true;
+            StateTransition(CanvasState.Panning);
+            // _state = CanvasState.Panning;
             _lastPointerPosition = pointer.Position;
             _panStartProperties = pointer.Properties;
             e.Handled = true;
@@ -195,8 +258,45 @@ public class BoardCanvas:Control
 
     protected override void OnPointerMoved(PointerEventArgs e)
     {
-        
-        if (_isPanning)
+        _lastMoveEvent = e;
+        // Multi-touch gestures
+        var pointer = e.GetCurrentPoint(this);
+        if (_activeTouches.ContainsKey(pointer.Pointer.Id))
+        {
+            _activeTouches[pointer.Pointer.Id] = pointer.Position;
+
+            switch (_activeTouches.Count)
+            {
+                case 1:
+                    if (_state == CanvasState.Normal)
+                    {
+                        StateTransition(CanvasState.Panning);
+                    }
+                    break;
+                case 2:
+                {
+                    
+                    var plist = new List<Point>(_activeTouches.Values);
+                    var currentDistance = GetDistanceBetweenPoints(plist);
+                    var scale = currentDistance / _initialDistance;
+                
+                    var center = MidPoint(plist.First(), plist.Last());
+                    var screenCenter = _canvasTransform.ScreenToCanvas(center);
+
+                    var zoomlevel = scale - 1;
+                    if (zoomlevel != 0)
+                    {
+                        StateTransition(CanvasState.Pinching); // we don't want to pan when Pinching
+                        _canvasTransform.Zoom(zoomlevel, screenCenter,0.02);
+                    }
+
+                    _initialDistance = currentDistance;
+                    break;
+                }
+            }
+        }
+
+        if (_state == CanvasState.Panning)
         {
             var currentPoint = e.GetCurrentPoint(this);
             var delta = currentPoint.Position - _lastPointerPosition;
@@ -216,13 +316,21 @@ public class BoardCanvas:Control
 
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
-        if (_isPanning)
+        var pointer = e.GetCurrentPoint(this);
+        if (_activeTouches.ContainsKey(pointer.Pointer.Id))
         {
-            _isPanning = false;
+            // remove it
+            _activeTouches.Remove(pointer.Pointer.Id);
+            
+        }
+        
+        if (_activeTouches.Count == 0)
+        {
+            StateTransition(CanvasState.Normal);
             e.Handled = true;
             return;
         }
-
+        
         HandleEvent(e);
         base.OnPointerReleased(e);
     }
@@ -245,5 +353,31 @@ public class BoardCanvas:Control
         e.Handled = true;
     
         base.OnPointerWheelChanged(e);
+    }
+    
+    /// <summary>
+    /// Get a dictionary, calculate Euler distance between first ttwo points
+    /// </summary>
+    /// <param name="points"></param>
+    /// <returns></returns>
+    private static double GetDistanceBetweenPoints(IEnumerable<Point> points)
+    {
+        var pointList = new List<Point>(points);
+        if (pointList.Count < 2)
+            return 0;
+
+        var p1 = pointList[0];
+        var p2 = pointList[1];
+        return Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
+    }
+    
+    private static Point MidPoint(Point a, Point b) => new((a.X + b.X) / 2, (a.Y + b.Y) / 2);
+
+    private bool StateTransition(CanvasState s)
+    {
+        // Pinching <-> Normal <-> Panning
+        if (_state == CanvasState.Pinching && s == CanvasState.Panning) return false;
+        _state = s;
+        return true;
     }
 }

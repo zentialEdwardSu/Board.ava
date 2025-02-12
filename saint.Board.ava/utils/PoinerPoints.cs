@@ -2,6 +2,7 @@
 using Avalonia.Input;
 using Avalonia.Media;
 using System.Collections.Generic;
+using saint.Board.ava.Views;
 
 namespace saint.Board.ava.utils;
 
@@ -153,25 +154,27 @@ public class PointerPoints
     /// Pointer event handler with state management
     /// </summary>
     /// <param name="e"></param>
-    /// <param name="v"></param>
-    public void HandleEvent(PointerEventArgs e, Visual v)
+    /// <param name="canvas"></param>
+    public void HandleEvent(PointerEventArgs e, BoardCanvas canvas)
     {
         e.Handled = true;
         e.PreventGestureRecognition();
         
-        var currentPoint = e.GetCurrentPoint(v);
-        var points = e.GetIntermediatePoints(v);
+        var currentPoint = e.GetCurrentPoint(canvas);
+        var points = e.GetIntermediatePoints(canvas);
+        
+        var canvasPoint = canvas.ScreenToCanvas(currentPoint.Position);
 
         // Reset smoothing state on pen down
         if (e.RoutedEvent == InputElement.PointerPressedEvent)
         {
             _smoothingBuffer.Clear();
             _hasPreviousPoint = false;
-            AddPoint(currentPoint.Position, Brushes.Green, 10);
+            AddPoint(canvasPoint, Brushes.Green, 10);
         }
         else if (e.RoutedEvent == InputElement.PointerReleasedEvent)
         {
-            AddPoint(currentPoint.Position, Brushes.Red, 10);
+            AddPoint(canvasPoint, Brushes.Red, 10);
             _hasPreviousPoint = false;
         }
         else
@@ -179,7 +182,7 @@ public class PointerPoints
             for (int c = 0; c < points.Count; c++)
             {
                 var pt = points[c];
-                AddPoint(pt.Position, 
+                AddPoint(canvas.ScreenToCanvas(pt.Position), 
                     c == points.Count - 1 ? Brushes.Blue : Brushes.Black,
                     c == points.Count - 1 ? 5 : 2, 
                     pt.Properties.Pressure);

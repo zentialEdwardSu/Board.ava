@@ -16,5 +16,10 @@ namespace saint.Board.ava.Views
         {
             PressureCanvas.ClearBoard();
         }
+
+        private void ResetButton_OnClick(object? sender, RoutedEventArgs e)
+        {
+            PressureCanvas.ResetView();
+        }
     }
 }

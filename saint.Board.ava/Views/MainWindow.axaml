@@ -27,9 +27,15 @@
 	               IsVisible="True"
 	               HorizontalAlignment="Left"
 	               VerticalAlignment="Top" />
-	    <Button x:Name="CleanButton"
-	            Click="CleanButton_OnClick"
-	            HorizontalAlignment="Right"
-	            VerticalAlignment="Bottom">Clean</Button>
+	    <StackPanel HorizontalAlignment="Right"
+	           VerticalAlignment="Bottom"
+	           Orientation="Horizontal"
+	           Spacing="20">
+		    <Button x:Name="CleanButton"
+		            Click="CleanButton_OnClick">Clean</Button>
+		    <Button x:Name="ResetViewButton" 
+		            Click="ResetButton_OnClick" >ResetView</Button>
+	    </StackPanel>
+
     </Panel>
 </Window>
