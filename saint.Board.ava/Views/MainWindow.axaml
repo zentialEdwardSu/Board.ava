@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:saint.Board.ava.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="using:saint.Board.ava.Views"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        x:Class="saint.Board.ava.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/saintico.ico"
+        Title="saint.Board">
+
+    <Design.DataContext>
+        <!-- This only sets the DataContext for the previewer in an IDE,
+             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <!--<TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>-->
+    <Panel TextElement.Foreground="Black">
+	    <local:BoardCanvas x:Name="PressureCanvas"
+	                         DrawOnlyPoints="False"
+	                         Status="{Binding #Status2TextBlock.Text, Mode=OneWayToSource}"
+	                         ThreadSleep="{Binding ThreadSleep}"
+	                         InputDevices="{Binding InputDevices}"/>
+	    <TextBlock x:Name="Status2TextBlock"
+	               IsVisible="True"
+	               HorizontalAlignment="Left"
+	               VerticalAlignment="Top" />
+	    <Button x:Name="CleanButton"
+	            Click="CleanButton_OnClick"
+	            HorizontalAlignment="Right"
+	            VerticalAlignment="Bottom">Clean</Button>
+    </Panel>
+</Window>

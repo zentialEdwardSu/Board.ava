@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AvaloniaProject">
+    <option name="projectPerEditor">
+      <map>
+        <entry key="saint.Board.ava/Views/BoardCanvas.axaml" value="saint.Board.ava/saint.Board.ava.csproj" />
+        <entry key="saint.Board.ava/Views/MainWindow.axaml" value="saint.Board.ava/saint.Board.ava.csproj" />
+        <entry key="saint.Board.ava/Views/TemplatedControl1.axaml" value="saint.Board.ava/saint.Board.ava.csproj" />
+        <entry key="saint.Board.ava/Views/UserControl1.axaml" value="saint.Board.ava/saint.Board.ava.csproj" />
+      </map>
+    </option>
+  </component>
+</project>
