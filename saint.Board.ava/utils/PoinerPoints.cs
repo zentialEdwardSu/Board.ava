@@ -1,4 +1,5 @@
-﻿using Avalonia;
+﻿using System;
+using Avalonia;
 using Avalonia.Input;
 using Avalonia.Media;
 using System.Collections.Generic;
@@ -8,6 +9,17 @@ namespace saint.Board.ava.utils;
 
 public class PointerPoints
 {
+    // 添加最后更新时间
+    public DateTime LastUpdated { get; private set; } = DateTime.Now;
+    // 添加包围盒
+    public Rect Bounds { get; private set; }
+    
+    private void UpdateBounds(Point newPoint)
+    {
+        var rect = new Rect(newPoint, newPoint);
+        Bounds = Bounds == default(Rect) ? rect : Bounds.Union(rect);
+    }
+    
     // Represents a single point on canvas with drawing properties
     private struct CanvasPoint
     {
@@ -188,5 +200,7 @@ public class PointerPoints
                     pt.Properties.Pressure);
             }
         }
+        LastUpdated = DateTime.Now;
+        UpdateBounds(canvasPoint);
     }
 }

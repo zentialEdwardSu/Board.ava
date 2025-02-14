@@ -8,6 +8,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using saint.Board.ava.utils;
 
@@ -18,6 +19,14 @@ internal enum CanvasState
     Normal = 1,
     Pinching,
     Panning,
+}
+
+internal class StaticStroke
+{
+    public int OriginId { get; set; }
+    public RenderTargetBitmap Bitmap { get; set; }
+    public Rect Bounds { get; set; }
+    public Matrix Transform { get; set; }
 }
 
 public class BoardCanvas:Control
@@ -34,7 +43,7 @@ public class BoardCanvas:Control
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private int _events; // Event counter for FPS calculation
     private IDisposable? _statusUpdated;
-    private Dictionary<int, PointerPoints> _pointers = new(); // hold stroke create by Pen
+    // private Dictionary<int, PointerPoints> _pointers = new(); // hold stroke create by Pen
     private PointerPointProperties? _lastProperties;
     private PointerUpdateKind? _lastNonOtherUpdateKind;// for Mouse button event
     
@@ -43,6 +52,9 @@ public class BoardCanvas:Control
     private double _initialDistance;
 
     public Dictionary<int, Point> ActiveTouch => _activeTouches;
+    
+    private Dictionary<int, PointerPoints> _activePointers = new();
+    private LimitedQueue<StaticStroke> _staticStrokes = new(100); 
 
     private int _threadSleep; // Sampling interval control
     public static readonly DirectProperty<BoardCanvas, int> ThreadSleepProperty =
@@ -112,7 +124,9 @@ YTilt: {_lastProperties?.YTilt}
 Twist: {_lastProperties?.Twist}
 ZoomLevel: {_canvasTransform.ZoomLevel}
 ActiveTouch: {_activeTouches?.Count}
-CanvasState: {_state.ToString()}";
+CanvasState: {_state.ToString()}
+StrokesNumber: {_activePointers?.Count}
+MemoryPressure: {GetMemoryPressure()}";
                 _stopwatch.Restart();
                 _events = 0;
             }
@@ -141,8 +155,8 @@ CanvasState: {_state.ToString()}";
         }
         InvalidateVisual(); // request repaint
 
-        var lastPointer = e.GetCurrentPoint(this);
-        _lastProperties = lastPointer.Properties;
+        var currentPoint = e.GetCurrentPoint(this);
+        _lastProperties = currentPoint.Properties;
         
         // For Mouse, check mouse button event
         // https://reference.avaloniaui.net/api/Avalonia.Input/PointerUpdateKind/
@@ -160,12 +174,14 @@ CanvasState: {_state.ToString()}";
         
         // Handle active input (pen with pressure or non-pen devices)
         if (e.Pointer.Type != PointerType.Pen
-            || lastPointer.Properties.Pressure > 0)
+            || currentPoint.Properties.Pressure > 0)
         {
-            if (!_pointers.TryGetValue(e.Pointer.Id, out var pt))
-                _pointers[e.Pointer.Id] = pt = new PointerPoints();
+            if (!_activePointers.TryGetValue(e.Pointer.Id, out var pt))
+                _activePointers[e.Pointer.Id] = pt = new PointerPoints();
             pt.HandleEvent(e, this);
         }
+        
+        // _dirtyRegion = _dirtyRegion.Union(new Rect(currentPoint.Position, new Size(10,10)));
     }
 
     public override void Render(DrawingContext context)
@@ -175,28 +191,45 @@ CanvasState: {_state.ToString()}";
             // draw background 
             var infiniteBounds = new Rect(-100000, -100000, 200000, 200000);
             context.FillRectangle(Brushes.White, infiniteBounds);
-        
-            // render strokes
-            foreach (var pt in _pointers.Values)
-                pt.Render(context, _drawOnlyPoints);
-            
-            // 绘制缩放中心点
-            if (_state == CanvasState.Pinching && _activeTouches.Count == 2)
-            {
-                var center = MidPoint(_activeTouches.Values.First(), _activeTouches.Values.Last());
-                var canvasCenter = _canvasTransform.ScreenToCanvas(center);
 
-                // 绘制一个圆形作为中心点标记
-                var brush = new SolidColorBrush(Colors.Red);
-                var pen = new Pen(Brushes.Black, 2);
-                context.DrawEllipse(brush, pen, canvasCenter, 10, 10);
-            }
+            // render static stroke
+            // foreach (var staticStroke in _staticStrokes.Where(staticStroke =>
+            //              staticStroke.Transform == _canvasTransform.TransformMatrix))
+            // {
+            //     context.DrawImage(staticStroke.Bitmap,
+            //         new Rect(staticStroke.Bitmap.Size),
+            //         staticStroke.Bounds);
+            // }
         }
+
+        using (context.PushTransform(_canvasTransform.TransformMatrix))
+        {
+            foreach (var stroke in _activePointers.Values)
+            {
+                stroke.Render(context, _drawOnlyPoints);
+            }
+        
+        }
+        
+        // 绘制缩放中心点
+        if (_state == CanvasState.Pinching && _activeTouches.Count == 2)
+        {
+            var center = MidPoint(_activeTouches.Values.First(), _activeTouches.Values.Last());
+            var canvasCenter = _canvasTransform.ScreenToCanvas(center);
+
+            // 绘制一个圆形作为中心点标记
+            var brush = new SolidColorBrush(Colors.Red);
+            var pen = new Pen(Brushes.Black, 2);
+            context.DrawEllipse(brush, pen, canvasCenter, 10, 10);
+        }
+        
+        // TryStaticizeStrokes();
+        // _dirtyRegion = default;
     }
 
     public void ClearBoard()
     {
-        _pointers.Clear();
+        _activePointers.Clear();
         InvalidateVisual();
     }
     
@@ -215,10 +248,9 @@ CanvasState: {_state.ToString()}";
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        Debug.WriteLine("OnPointerPressed");
         if (e.ClickCount == 2)
         {
-            _pointers.Clear();
+            _activePointers.Clear();
             InvalidateVisual();
             return;
         }
@@ -380,4 +412,69 @@ CanvasState: {_state.ToString()}";
         _state = s;
         return true;
     }
+    
+    [Obsolete("Deprecated pending refactoring",true)]
+    private void TryStaticizeStrokes()
+    {
+        var now = DateTime.Now;
+        var memPressure = GetMemoryPressure();
+        var dynamicThreshold = memPressure switch {
+            MemoryPressure.High => TimeSpan.FromSeconds(10),
+            MemoryPressure.Medium => TimeSpan.FromSeconds(20),
+            _ => TimeSpan.FromSeconds(30)
+        };
+    
+        foreach (var kvp in _activePointers.ToList())
+        {
+            if (now - kvp.Value.LastUpdated > dynamicThreshold)
+            {
+                // 生成位图
+                var stroke = kvp.Value;
+                var bmp = RenderToBitmap(stroke);
+            
+                // 记录变换矩阵
+                _staticStrokes.Enqueue(new StaticStroke {
+                    OriginId = kvp.Key,
+                    Bitmap = bmp,
+                    Bounds = stroke.Bounds,
+                    Transform = _canvasTransform.TransformMatrix
+                });
+            
+                // 移出活动集合
+                _activePointers.Remove(kvp.Key);
+            }
+        }
+    }
+
+    [Obsolete("Deprecated pending refactoring",true)]
+    private static RenderTargetBitmap RenderToBitmap(PointerPoints stroke)
+    {
+        var bounds = stroke.Bounds.Inflate(1);
+        var size = new Size(bounds.Width, bounds.Height);
+    
+        PixelSize pixelSize = new((int)Math.Ceiling(size.Width),(int)Math.Ceiling(size.Height));
+        
+        var bmp = new RenderTargetBitmap(pixelSize, new Vector(96, 96));
+
+        using var ctx = bmp.CreateDrawingContext();
+        ctx.PushTransform(Matrix.CreateTranslation(-bounds.X, -bounds.Y));
+        stroke.Render(ctx, drawPoints: false);
+
+        return bmp;
+    }
+    
+    private enum MemoryPressure { Low, Medium, High }
+
+    private MemoryPressure GetMemoryPressure()
+    {
+        var process = Process.GetCurrentProcess();
+        var totalMem = process.WorkingSet64;
+    
+        return totalMem switch {
+            > 500_000_000 => MemoryPressure.High,
+            > 200_000_000 => MemoryPressure.Medium,
+            _ => MemoryPressure.Low
+        };
+    }
+
 }
