@@ -21,5 +21,10 @@ namespace saint.Board.ava.Views
         {
             PressureCanvas.ResetView();
         }
+
+        private void Button_OnClick(object? sender, RoutedEventArgs e)
+        {
+            PressureCanvas.ToggleEraserMode();
+        }
     }
 }

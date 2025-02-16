@@ -31,19 +31,12 @@ internal class StaticStroke
     public Matrix Transform { get; set; }
 }
 
-internal class CanvasImage
+internal class CanvasImage(IImage? bitmap, Rect bounds, Matrix? transform)
 {
-    public IImage? Bitmap { get; set; }
-    public Rect Bounds { get; set; }
-    public Matrix Transform { get; set; }
-    
-    public CanvasImage(IImage? bitmap, Rect bounds, Matrix? transform)
-    {
-        Bitmap = bitmap;
-        Bounds = bounds;
-        Transform = transform ?? Matrix.Identity;
-    }
-    
+    public IImage? Bitmap { get; set; } = bitmap;
+    public Rect Bounds { get; set; } = bounds;
+    public Matrix Transform { get; set; } = transform ?? Matrix.Identity;
+
     public CanvasImage(IImage bitmap, Point position)
         : this(bitmap, new Rect(position, bitmap?.Size ?? default), Matrix.Identity)
     {
@@ -91,6 +84,17 @@ public class BoardCanvas:UserControl
     private readonly HashSet<string> _imageExtensions =
         [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".svg"];
     
+    private enum EraserMode { Partial, Full }
+    private EraserMode _eraserMode = EraserMode.Full;
+    private Rect _eraserArea;
+    private bool _isErasing;
+    private const double EraserBaseRadius = 10;
+    private const double MinEraserRadius = EraserBaseRadius;
+    private const double MaxEraserRadius = EraserBaseRadius * 15;
+    private const int ErGamma = 2;
+    private double EraserRadius => MinEraserRadius + (MaxEraserRadius - MinEraserRadius) * Math.Pow((double?)_lastProperties?.Pressure??0.1, ErGamma);
+    
+    // For selection
     private List<string> _selectionID = [];
 
     private int _threadSleep; // Sampling interval control
@@ -137,6 +141,7 @@ public class BoardCanvas:UserControl
     
     public BoardCanvas()
     {
+        _isErasing = false;
         AddHandler(DragDrop.DropEvent, Drop);
         AddHandler(DragDrop.DragOverEvent, DragOver);
     }
@@ -173,7 +178,8 @@ CanvasState: {_state.ToString()}
 StrokesNumber: {_activePointers?.Count}
 ImageNumber: {_images?.Count}
 MemoryPressure: {GetMemoryPressure()}
-DropStatus: {_dropStatus}";
+DropStatus: {_dropStatus}
+EraserMode: {_eraserMode}";
                 _stopwatch.Restart();
                 _events = 0;
             }
@@ -194,6 +200,8 @@ DropStatus: {_dropStatus}";
     {
         _events++;
 
+        _isErasing = _lastProperties?.IsEraser ?? false;
+        
         // Throttle sampling rate
         if (_threadSleep != 0)
         {
@@ -219,13 +227,28 @@ DropStatus: {_dropStatus}";
             return;
         }
         
+        var canvasPos = ScreenToCanvas(currentPoint.Position);
+        _eraserArea = new Rect(
+            canvasPos.X - EraserRadius,
+            canvasPos.Y - EraserRadius,
+            EraserRadius * 2,
+            EraserRadius * 2
+        );
+        
+        if (_isErasing && currentPoint.Properties.Pressure > 0)
+        {
+            ProcessErasure(currentPoint);
+            e.Handled = true;
+            return;
+        }
+        
         // Handle active input (pen with pressure or non-pen devices)
         if (e.Pointer.Type != PointerType.Pen
             || currentPoint.Properties.Pressure > 0)
         {
             if (!_activePointers.TryGetValue(e.Pointer.Id.ToString(), out var pt))
                 _activePointers[e.Pointer.Id.ToString()] = pt = new PointerPoints();
-            pt.HandleEvent(e, this);
+            pt.HandleEvent(e, this,_isErasing);
         }
         
         // _dirtyRegion = _dirtyRegion.Union(new Rect(currentPoint.Position, new Size(10,10)));
@@ -266,17 +289,24 @@ DropStatus: {_dropStatus}";
             }
         
         }
-        
-        // 绘制缩放中心点
+
+#if DEBUG
         if (_state == CanvasState.Pinching && _activeTouches.Count == 2)
         {
             var center = MidPoint(_activeTouches.Values.First(), _activeTouches.Values.Last());
             var canvasCenter = _canvasTransform.ScreenToCanvas(center);
-
-            // 绘制一个圆形作为中心点标记
+            
             var brush = new SolidColorBrush(Colors.Red);
             var pen = new Pen(Brushes.Black, 2);
             context.DrawEllipse(brush, pen, canvasCenter, 10, 10);
+        }
+#endif
+        
+        if (_isErasing)
+        {
+            var screenPos = CanvasToScreen(_eraserArea.Center);
+            var brush = new SolidColorBrush(Colors.Gray, 0.3);
+            context.DrawEllipse(brush, null, screenPos, EraserRadius, EraserRadius);
         }
         
         // TryStaticizeStrokes();
@@ -533,6 +563,146 @@ DropStatus: {_dropStatus}";
         if (_state == CanvasState.Pinching && s == CanvasState.Panning) return false;
         _state = s;
         return true;
+    }
+    
+    public void ToggleEraserMode()
+    {
+        _eraserMode = _eraserMode == EraserMode.Partial ? EraserMode.Full : EraserMode.Partial;
+    }
+    
+    private void ProcessErasure(PointerPoint currentPoint)
+    {
+        if (_eraserMode == EraserMode.Partial)
+        {
+            foreach (var strokeKey in _activePointers.Keys.ToList())
+            {
+                var stroke = _activePointers[strokeKey];
+                var removed = stroke.ErasePointsInArea(_eraserArea);
+        
+                if (stroke.IsEmpty)
+                {
+                    _activePointers.Remove(strokeKey);
+                }
+                else if (removed)
+                {
+                    InvalidateVisual();
+                }
+            }
+        }
+        else
+        {
+            var strokesToRemove = _activePointers
+                .Where(kvp => StrokeIntersectsEraserArea(kvp.Value))
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var key in strokesToRemove)
+            {
+                _activePointers.Remove(key);
+            }
+
+            if (strokesToRemove.Count > 0)
+            {
+                InvalidateVisual();
+            }
+        }
+        
+    }
+    
+    private bool StrokeIntersectsEraserArea(PointerPoints stroke)
+    {
+        // exclude
+        if (!stroke.Bounds.Intersects(_eraserArea))
+            return false;
+
+        var points = stroke.GetActivePoints().Select(p => p.Point).ToList();
+        
+        // check line segment
+        for (var i = 1; i < points.Count; i++)
+        {
+            if (LineSegmentIntersectsRect(points[i-1], points[i], _eraserArea))
+                return true;
+        }
+        return false;
+    }
+
+    private bool LineSegmentIntersectsRect(Point p1, Point p2, Rect rect)
+    {
+        // Cohen-Sutherland
+        var outcode1 = ComputeOutCode(p1, rect);
+        var outcode2 = ComputeOutCode(p2, rect);
+        
+        while (true)
+        {
+            if ((outcode1 | outcode2) == 0) return true;
+            if ((outcode1 & outcode2) != 0) return false;
+            
+            var outside = outcode1 != 0 ? outcode1 : outcode2;
+            var p = CalculateIntersection(p1, p2, outside, rect);
+            
+            if (outside == outcode1)
+            {
+                p1 = p;
+                outcode1 = ComputeOutCode(p1, rect);
+            }
+            else
+            {
+                p2 = p;
+                outcode2 = ComputeOutCode(p2, rect);
+            }
+        }
+    }
+
+    private static OutCode ComputeOutCode(Point p, Rect rect)
+    {
+        var code = OutCode.Inside;
+        if (p.X < rect.Left) code |= OutCode.Left;
+        else if (p.X > rect.Right) code |= OutCode.Right;
+        if (p.Y < rect.Top) code |= OutCode.Top;
+        else if (p.Y > rect.Bottom) code |= OutCode.Bottom;
+        return code;
+    }
+
+    [Flags]
+    private enum OutCode
+    {
+        Inside = 0,
+        Left = 1,
+        Right = 2,
+        Top = 4,
+        Bottom = 8
+    }
+
+    private Point CalculateIntersection(Point p1, Point p2, OutCode clipTo, Rect rect)
+    {
+        var dx = p2.X - p1.X;
+        var dy = p2.Y - p1.Y;
+
+        var slopeY = dx == 0 ? double.PositiveInfinity : dy / dx;
+        var slopeX = dy == 0 ? double.PositiveInfinity : dx / dy;
+
+        if (clipTo.HasFlag(OutCode.Top))
+        {
+            double x = p1.X + (rect.Top - p1.Y) * slopeX;
+            return new Point(x, rect.Top);
+        }
+        else if (clipTo.HasFlag(OutCode.Bottom))
+        {
+            double x = p1.X + (rect.Bottom - p1.Y) * slopeX;
+            return new Point(x, rect.Bottom);
+        }
+        else if (clipTo.HasFlag(OutCode.Right))
+        {
+            double y = p1.Y + (rect.Right - p1.X) * slopeY;
+            return new Point(rect.Right, y);
+        }
+        else if (clipTo.HasFlag(OutCode.Left))
+        {
+            double y = p1.Y + (rect.Left - p1.X) * slopeY;
+            return new Point(rect.Left, y);
+        }
+
+        return p1;
     }
     
     [Obsolete("Deprecated pending refactoring",true)]

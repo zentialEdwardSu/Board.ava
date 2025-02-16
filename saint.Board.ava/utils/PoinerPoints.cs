@@ -3,25 +3,29 @@ using Avalonia;
 using Avalonia.Input;
 using Avalonia.Media;
 using System.Collections.Generic;
+using System.Linq;
 using saint.Board.ava.Views;
 
 namespace saint.Board.ava.utils;
 
 public class PointerPoints
 {
-    // 添加最后更新时间
     public DateTime LastUpdated { get; private set; } = DateTime.Now;
-    // 添加包围盒
-    public Rect Bounds { get; private set; }
+    public Rect Bounds { get; set; }
+    
+    private double MaxRadius => GetActivePoints()
+        .Select(p => p.Radius)
+        .DefaultIfEmpty(0)
+        .Max();
     
     private void UpdateBounds(Point newPoint)
     {
-        var rect = new Rect(newPoint, newPoint);
+        var rect = new Rect(newPoint,new Size(5,5));
         Bounds = Bounds == default(Rect) ? rect : Bounds.Union(rect);
     }
     
     // Represents a single point on canvas with drawing properties
-    private struct CanvasPoint
+    public struct CanvasPoint
     {
         public IBrush? Brush;       // Brush color for the point
         public Point Point;         // Position coordinates
@@ -34,6 +38,8 @@ public class PointerPoints
     private int _index; // Current write position
     private int _count; // Valid points count
     
+    public bool IsEmpty => _count == 0;
+    
     // Smooth
     private Point _lastSmoothedPoint; // Last smoothed position
     private bool _hasPreviousPoint; // Smoothing state flag
@@ -41,6 +47,37 @@ public class PointerPoints
     
     // Brush Cache
     private readonly Dictionary<(IBrush, double), Pen> _penCache = new Dictionary<(IBrush, double), Pen>();
+    
+    public Geometry GetGeometry()
+    {
+        var path = new PathGeometry();
+        using (var ctx = path.Open())
+        {
+            CanvasPoint? prev = null;
+            foreach (var pt in GetActivePoints())
+            {
+                if (prev.HasValue)
+                {
+                    ctx.BeginFigure(prev.Value.Point, false);
+                    ctx.LineTo(pt.Point);
+                    ctx.EndFigure(false);
+                }
+                prev = pt;
+            }
+        }
+        return path;
+    }
+    
+    public IEnumerable<CanvasPoint> GetActivePoints()
+    {
+        var startIndex = (_index - _count + BufferSize) % BufferSize;
+        for (var i = 0; i < _count; i++)
+        {
+            var index = (startIndex + i) % BufferSize;
+            if (_points[index].Radius > 0)
+                yield return _points[index];
+        }
+    }
 
     /// <summary>
     /// Main rendering method with performance optimizations
@@ -60,6 +97,14 @@ public class PointerPoints
         {
             int currentIndex = (startIndex + i) % BufferSize;
             var pt = _points[currentIndex];
+#if DEBUG
+            context.DrawRectangle(null,new Pen(Brushes.Aqua,1),Bounds);
+#endif
+            if (pt.Radius <= 0)
+            {
+                prev = null; // cut the line
+                continue; // skip deleted point
+            }
             
             // Line drawing logic
             if (prev.HasValue && !drawPoints)
@@ -167,10 +212,17 @@ public class PointerPoints
     /// </summary>
     /// <param name="e"></param>
     /// <param name="canvas"></param>
-    public void HandleEvent(PointerEventArgs e, BoardCanvas canvas)
+    /// <param name="isErasing"></param>
+    public void HandleEvent(PointerEventArgs e, BoardCanvas canvas,bool isErasing)
     {
         e.Handled = true;
         e.PreventGestureRecognition();
+        
+        if (isErasing)
+        {
+            // Not add point will use eraser
+            return;
+        }
         
         var currentPoint = e.GetCurrentPoint(canvas);
         var points = e.GetIntermediatePoints(canvas);
@@ -202,5 +254,23 @@ public class PointerPoints
         }
         LastUpdated = DateTime.Now;
         UpdateBounds(canvasPoint);
+    }
+    
+    public bool ErasePointsInArea(Rect area)
+    {
+        var startIndex = (_index - _count + BufferSize) % BufferSize;
+        
+        var removed = false;
+        for (var i = 0; i < _count; i++)
+        {
+            var index = (startIndex + i) % _points.Length;
+            if (area.Contains(_points[index].Point))
+            {
+                // set radius to 0 to mark the point as deleted
+                _points[index].Radius = 0;
+                removed = true;
+            }
+        }
+        return removed;
     }
 }

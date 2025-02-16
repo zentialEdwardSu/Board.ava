@@ -32,6 +32,9 @@
 	           VerticalAlignment="Bottom"
 	           Orientation="Horizontal"
 	           Spacing="20">
+		    <ToggleSwitch Click="Button_OnClick"
+		                  OnContent="Partial"
+		                  OffContent="Full"></ToggleSwitch>
 		    <Button x:Name="CleanButton"
 		            Click="CleanButton_OnClick">Clean</Button>
 		    <Button x:Name="ResetViewButton" 
