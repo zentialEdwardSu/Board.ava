@@ -19,6 +19,7 @@
     <!--<TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>-->
     <Panel TextElement.Foreground="Black">
 	    <local:BoardCanvas x:Name="PressureCanvas"
+	                         DragDrop.AllowDrop="True"
 	                         DrawOnlyPoints="False"
 	                         Status="{Binding #Status2TextBlock.Text, Mode=OneWayToSource}"
 	                         ThreadSleep="{Binding ThreadSleep}"

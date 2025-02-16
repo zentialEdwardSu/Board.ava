@@ -1,14 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
-
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia;
+using Avalonia.Controls.Notifications;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using saint.Board.ava.utils;
 
@@ -23,13 +25,37 @@ internal enum CanvasState
 
 internal class StaticStroke
 {
-    public int OriginId { get; set; }
+    public string OriginId { get; set; }
     public RenderTargetBitmap Bitmap { get; set; }
     public Rect Bounds { get; set; }
     public Matrix Transform { get; set; }
 }
 
-public class BoardCanvas:Control
+internal class CanvasImage
+{
+    public IImage? Bitmap { get; set; }
+    public Rect Bounds { get; set; }
+    public Matrix Transform { get; set; }
+    
+    public CanvasImage(IImage? bitmap, Rect bounds, Matrix? transform)
+    {
+        Bitmap = bitmap;
+        Bounds = bounds;
+        Transform = transform ?? Matrix.Identity;
+    }
+    
+    public CanvasImage(IImage bitmap, Point position)
+        : this(bitmap, new Rect(position, bitmap?.Size ?? default), Matrix.Identity)
+    {
+        ArgumentNullException.ThrowIfNull(bitmap);
+    }
+    public void Render(DrawingContext context)
+    {
+        if (Bitmap != null) context.DrawImage(Bitmap, new Rect(Bitmap.Size), Bounds);
+    }
+}
+
+public class BoardCanvas:UserControl
 {    
     // Transform fields
     private CanvasTransform _canvasTransform = new();
@@ -37,7 +63,8 @@ public class BoardCanvas:Control
     // private bool _isPanning;
     private Point _lastPointerPosition;
     private PointerPointProperties _panStartProperties;
-    private PointerEventArgs _lastMoveEvent;
+    private PointerEventArgs? _lastMoveEvent;
+    private string _dropStatus;
     
     // Performance monitoring fields
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
@@ -53,8 +80,18 @@ public class BoardCanvas:Control
 
     public Dictionary<int, Point> ActiveTouch => _activeTouches;
     
-    private Dictionary<int, PointerPoints> _activePointers = new();
+    private Dictionary<string, PointerPoints> _activePointers = new();
     private LimitedQueue<StaticStroke> _staticStrokes = new(100); 
+    
+    // For Images
+    private ImageLoader _imageLoader = new();
+    private Dictionary<string,CanvasImage> _images = [];
+    private Point? _dragStartPosition;
+    private CanvasImage? _draggingImage;
+    private readonly HashSet<string> _imageExtensions =
+        [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".svg"];
+    
+    private List<string> _selectionID = [];
 
     private int _threadSleep; // Sampling interval control
     public static readonly DirectProperty<BoardCanvas, int> ThreadSleepProperty =
@@ -98,9 +135,17 @@ public class BoardCanvas:Control
 
     private double _scalingSoftFactor = 0.1;
     
+    public BoardCanvas()
+    {
+        AddHandler(DragDrop.DropEvent, Drop);
+        AddHandler(DragDrop.DragOverEvent, DragOver);
+    }
+    
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        
+        _imageLoader.NotificationManager = new WindowNotificationManager(TopLevel.GetTopLevel(this)!);
         
         // Setup status update timer
         _statusUpdated = DispatcherTimer.Run(() =>
@@ -126,7 +171,9 @@ ZoomLevel: {_canvasTransform.ZoomLevel}
 ActiveTouch: {_activeTouches?.Count}
 CanvasState: {_state.ToString()}
 StrokesNumber: {_activePointers?.Count}
-MemoryPressure: {GetMemoryPressure()}";
+ImageNumber: {_images?.Count}
+MemoryPressure: {GetMemoryPressure()}
+DropStatus: {_dropStatus}";
                 _stopwatch.Restart();
                 _events = 0;
             }
@@ -176,8 +223,8 @@ MemoryPressure: {GetMemoryPressure()}";
         if (e.Pointer.Type != PointerType.Pen
             || currentPoint.Properties.Pressure > 0)
         {
-            if (!_activePointers.TryGetValue(e.Pointer.Id, out var pt))
-                _activePointers[e.Pointer.Id] = pt = new PointerPoints();
+            if (!_activePointers.TryGetValue(e.Pointer.Id.ToString(), out var pt))
+                _activePointers[e.Pointer.Id.ToString()] = pt = new PointerPoints();
             pt.HandleEvent(e, this);
         }
         
@@ -191,6 +238,15 @@ MemoryPressure: {GetMemoryPressure()}";
             // draw background 
             var infiniteBounds = new Rect(-100000, -100000, 200000, 200000);
             context.FillRectangle(Brushes.White, infiniteBounds);
+
+            var b = new SolidColorBrush(new Color());
+            
+            // render Image
+            foreach (var (_,img) in _images)
+            {
+                img.Render(context);
+                DrawSelectRect(context,img.Bounds,Brushes.Indigo, Brushes.Blue);
+            }
 
             // render static stroke
             // foreach (var staticStroke in _staticStrokes.Where(staticStroke =>
@@ -387,6 +443,72 @@ MemoryPressure: {GetMemoryPressure()}";
         base.OnPointerWheelChanged(e);
     }
     
+    void DragOver(object? sender, DragEventArgs e)
+    {
+        
+        e.DragEffects = e.DragEffects & (DragDropEffects.Copy);
+
+        // Only allow if the dragged data contains text or filenames.
+        if (!e.Data.Contains(DataFormats.Text)
+            && !e.Data.Contains(DataFormats.Files))
+            e.DragEffects = DragDropEffects.None;
+        
+        // also check mime type
+        if (!e.Data.Contains(DataFormats.Files)) return;
+        
+        // check if the files are image format
+        var files = e.Data.GetFiles()?.ToList();
+        if (files == null || files.Count == 0)
+        {
+            e.DragEffects = DragDropEffects.None;
+            return;
+        }
+        
+        foreach (var item in files)
+        {
+            // exclude floders
+            if (item is not IStorageFile file)
+            {
+                e.DragEffects = DragDropEffects.None;
+                break;
+            }
+
+            // check if image
+            var extension = Path.GetExtension(file.Name);
+            if (!string.IsNullOrEmpty(extension) &&
+                _imageExtensions.Contains(extension.ToLowerInvariant())) continue;
+            e.DragEffects = DragDropEffects.None;
+            break;
+        }
+    }
+
+    async void Drop(object? sender, DragEventArgs e)
+    {
+        var pos = e.GetPosition(this);
+        
+        if (e.Data.Contains(DataFormats.Text))
+        {
+            _dropStatus = $@"{e.Data.GetText()} on ({pos.X}, {pos.Y})";
+        }
+        else if (e.Data.Contains(DataFormats.Files))
+        {
+            var files = e.Data.GetFiles() ?? Array.Empty<IStorageItem>();
+            var contentString = "";
+            foreach (var f in files)
+            {
+                if (f is not IStorageFile file) continue;
+                var bitmap = await _imageLoader.LoadImageFromFolder(file);
+                if (bitmap != null)
+                {
+                    var ci = new CanvasImage(bitmap,pos);
+                    _images.Add(IdGenerator.GenerateUuid(false),ci);
+                }
+                contentString += $@"{f.Path.ToString()};";
+            }
+            _dropStatus = $@"{contentString} on ({pos.X}, {pos.Y})";
+        }
+    }
+    
     /// <summary>
     /// Get a dictionary, calculate Euler distance between first ttwo points
     /// </summary>
@@ -476,5 +598,31 @@ MemoryPressure: {GetMemoryPressure()}";
             _ => MemoryPressure.Low
         };
     }
+    
+    public static void DrawSelectRect(DrawingContext context, Rect rect, IBrush strokeBrush, IBrush vertexBrush)
+    {
+        const double vertexSize = 15;  
+        var pen = new Pen(strokeBrush, 3); 
+    
+        context.DrawLine(pen, rect.TopLeft, rect.TopRight);      
+        context.DrawLine(pen, rect.BottomLeft, rect.BottomRight);
+        context.DrawLine(pen, rect.TopLeft, rect.BottomLeft);    
+        context.DrawLine(pen, rect.TopRight, rect.BottomRight);  
 
+        void DrawVertex(Point center)
+        {
+            var rect = new Rect(
+                center.X - vertexSize/2,
+                center.Y - vertexSize/2,
+                vertexSize,
+                vertexSize);
+            context.FillRectangle(vertexBrush, rect);
+        }
+
+        DrawVertex(rect.TopLeft);     
+        DrawVertex(rect.TopRight);    
+        DrawVertex(rect.BottomLeft);  
+        DrawVertex(rect.BottomRight); 
+    }
+    
 }
